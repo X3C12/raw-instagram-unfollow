@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Raw Instagram Unfollow Tool</title>
+  <!-- Load JSZip from CDN for processing ZIP files -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <style>
+    body {
+      font-family: monospace;
+      max-width: 800px;
+      margin: 20px auto;
+      padding: 0 20px;
+      line-height: 1.5;
+    }
+    .upload-area {
+      border: 2px dashed #666;
+      padding: 40px;
+      text-align: center;
+      margin-bottom: 20px;
+      background: #f9f9f9;
+    }
+    input[type="file"] {
+      font-size: 16px;
+    }
+    .status {
+      font-weight: bold;
+      color: #333;
+      margin: 10px 0;
+    }
+    .error {
+      color: red;
+      font-weight: bold;
+    }
+    .tabs {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+      border-bottom: 1px solid #ccc;
+      padding-bottom: 10px;
+    }
+    .tab {
+      padding: 5px 15px;
+      cursor: pointer;
+      background: #eee;
+      border: 1px solid #ccc;
+      user-select: none;
+    }
+    .tab.active {
+      background: #333;
+      color: white;
+      border-color: #333;
+    }
+    .list-container {
+      display: none;
+    }
+    .list-container.active {
+      display: block;
+    }
+    ul {
+      list-style-type: none;
+      padding: 0;
+    }
+    li {
+      padding: 5px 0;
+      border-bottom: 1px solid #eee;
+    }
+    a {
+      color: #0066cc;
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Raw Instagram Unfollow Tool</h1>
+  <p>No false positives. Just raw data processing.</p>
+
+  <div class="upload-area">
+    <input type="file" id="zip-upload" accept=".zip">
+    <div id="status" class="status">Waiting for ZIP file...</div>
+  </div>
+
+  <div id="results" style="display: none;">
+    <div class="tabs">
+      <div class="tab active" data-target="not-following-back">Not Following Me Back (<span id="count-nfb">0</span>)</div>
+      <div class="tab" data-target="i-dont-follow-back">I Don't Follow Back (<span id="count-idfb">0</span>)</div>
+      <div class="tab" data-target="mutuals">Mutuals (<span id="count-mutuals">0</span>)</div>
+    </div>
+
+    <div id="not-following-back" class="list-container active">
+      <ul id="list-nfb"></ul>
+    </div>
+    
+    <div id="i-dont-follow-back" class="list-container">
+      <ul id="list-idfb"></ul>
+    </div>
+    
+    <div id="mutuals" class="list-container">
+      <ul id="list-mutuals"></ul>
+    </div>
+  </div>
+
+  <script>
+    // Tab switching logic
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.list-container').forEach(c => c.classList.remove('active'));
+        
+        tab.classList.add('active');
+        document.getElementById(tab.dataset.target).classList.add('active');
+      });
+    });
+
+    const fileInput = document.getElementById('zip-upload');
+    const statusEl = document.getElementById('status');
+
+    function updateStatus(msg, isError = false) {
+      statusEl.textContent = msg;
+      statusEl.className = isError ? 'status error' : 'status';
+    }
+
+    function extractUsernames(data) {
+      const usernames = [];
+      const seen = new Set();
+      
+      if (!data) return usernames;
+
+      // Handle array format or { relationships_*: [...] } format
+      let entries = [];
+      if (Array.isArray(data)) {
+        entries = data;
+      } else if (data.relationships_following) {
+        entries = data.relationships_following;
+      } else if (data.relationships_followers) {
+        entries = data.relationships_followers;
+      }
+
+      for (const entry of entries) {
+        let username = null;
+        
+        // Old format (value inside string_list_data)
+        if (entry.string_list_data && entry.string_list_data.length > 0 && entry.string_list_data[0].value) {
+          username = entry.string_list_data[0].value;
+        } 
+        // New format (username is the title)
+        else if (entry.title) {
+          username = entry.title;
+        }
+
+        if (username) {
+          // Normalize to prevent false positives
+          username = username.trim().toLowerCase();
+          if (username.length > 0 && !seen.has(username)) {
+            seen.add(username);
+            usernames.push(username);
+          }
+        }
+      }
+
+      return usernames;
+    }
+
+    fileInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      updateStatus(`Reading ${file.name}...`);
+      document.getElementById('results').style.display = 'none';
+
+      try {
+        const zip = await JSZip.loadAsync(file);
+        
+        let following = new Set();
+        let followers = new Set();
+
+        let filesProcessed = 0;
+
+        for (const filename of Object.keys(zip.files)) {
+          // Identify following and followers files
+          const isFollowing = /following(?:_.*)?\.json$/i.test(filename);
+          const isFollowers = /followers(?:_.*)?\.json$/i.test(filename);
+
+          if (!isFollowing && !isFollowers) continue;
+
+          updateStatus(`Parsing ${filename}...`);
+          filesProcessed++;
+
+          const content = await zip.files[filename].async("string");
+          let data;
+          try {
+            data = JSON.parse(content);
+          } catch (err) {
+            console.error(`Failed to parse ${filename}`, err);
+            continue;
+          }
+
+          const extracted = extractUsernames(data);
+          
+          if (isFollowing) {
+            extracted.forEach(u => following.add(u));
+          } else if (isFollowers) {
+            extracted.forEach(u => followers.add(u));
+          }
+        }
+
+        if (filesProcessed === 0) {
+          throw new Error("Could not find any follower/following JSON files in the ZIP.");
+        }
+
+        updateStatus(`Analyzing ${following.size} following and ${followers.size} followers...`);
+
+        // Calculate differences
+        const notFollowingBack = [];
+        const iDontFollowBack = [];
+        const mutuals = [];
+
+        for (const u of following) {
+          if (followers.has(u)) {
+            mutuals.push(u);
+          } else {
+            notFollowingBack.push(u);
+          }
+        }
+
+        for (const u of followers) {
+          if (!following.has(u)) {
+            iDontFollowBack.push(u);
+          }
+        }
+
+        // Render lists
+        const renderList = (elementId, countId, items) => {
+          document.getElementById(countId).textContent = items.length;
+          const ul = document.getElementById(elementId);
+          ul.innerHTML = '';
+          
+          items.sort().forEach(username => {
+            const li = document.createElement('li');
+            const a = document.createElement('a');
+            a.href = `https://instagram.com/${username}`;
+            a.target = '_blank';
+            a.rel = 'noopener noreferrer';
+            a.textContent = username;
+            li.appendChild(a);
+            ul.appendChild(li);
+          });
+        };
+
+        renderList('list-nfb', 'count-nfb', notFollowingBack);
+        renderList('list-idfb', 'count-idfb', iDontFollowBack);
+        renderList('list-mutuals', 'count-mutuals', mutuals);
+
+        updateStatus(`Done! Processed ${following.size} following and ${followers.size} followers.`);
+        document.getElementById('results').style.display = 'block';
+
+      } catch (error) {
+        console.error(error);
+        updateStatus(`Error: ${error.message}`, true);
+      }
+    });
+  </script>
+</body>
+</html>
